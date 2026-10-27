@@ -4,8 +4,10 @@
 HardwareSerial dfPlayer(2);
 const uint8_t volumePotPin = 34;
 const uint8_t nextButtonPin = 25;
-const uint16_t configuredTrackCount = 5;
+const uint16_t configuredTrackCount = 12;
+const uint8_t startVolume = 15;
 int lastVolume = -1;
+int lastPotValue = -1000;
 uint16_t trackCount = 0;
 uint16_t currentTrack = 0;
 unsigned long lastButtonPress = 0;
@@ -130,13 +132,60 @@ void selectNextTrack()
   currentTrack = currentTrack % trackCount + 1;
   Serial.print("Speel nummer ");
   Serial.println(currentTrack);
-  sendCommand(0x03, currentTrack);
+  sendCommand(0x08, currentTrack); // herhaal dit nummer continu
+}
+
+// Leest ongevraagde berichten van de DFPlayer zonder te blokkeren, zodat
+// het afspelen niet verstoord wordt door extra commando's.
+void logDfPlayerMessages()
+{
+  static uint8_t frame[10];
+  static uint8_t count = 0;
+
+  while (dfPlayer.available()) {
+    const uint8_t byte = dfPlayer.read();
+    if (count == 0 && byte != 0x7E) {
+      continue;
+    }
+
+    frame[count++] = byte;
+    if (count < sizeof(frame)) {
+      continue;
+    }
+    count = 0;
+
+    const uint8_t command = frame[3];
+    const uint16_t parameter =
+        (static_cast<uint16_t>(frame[5]) << 8) | frame[6];
+    switch (command) {
+    case 0x3D:
+      Serial.print("Nummer ");
+      Serial.print(parameter);
+      Serial.println(" is afgelopen.");
+      break;
+    case 0x40:
+      Serial.print("DFPlayer FOUT, code ");
+      Serial.println(parameter);
+      break;
+    case 0x3A:
+      Serial.println("SD-kaart verwijderd/ingestoken.");
+      break;
+    default:
+      break;
+    }
+  }
 }
 
 void updateVolumeFromPot()
 {
   const int potValue = analogRead(volumePotPin);
+  // ADC-ruis negeren, anders worden er continu volume-commando's gestuurd.
+  if (abs(potValue - lastPotValue) < 60) {
+    return;
+  }
+
   const int volume = map(potValue, 0, 4095, 0, 30);
+  lastPotValue = potValue;
 
   if (volume == lastVolume) {
     return;
@@ -167,6 +216,15 @@ void setup()
   testCommand("Status", 0x42);
   testCommand("Equalizer normaal", 0x07, 0);
   Serial.println("Test klaar. Draai aan de potmeter of druk op de knop.");
+
+  // Starten op vast volume; de potmeter neemt pas over zodra hij bewogen wordt.
+  lastPotValue = analogRead(volumePotPin);
+  lastVolume = startVolume;
+  sendCommand(0x06, startVolume);
+  Serial.print("Volume ingesteld op ");
+  Serial.println(startVolume);
+  delay(100);
+  selectNextTrack();
 }
 
 void loop()
@@ -181,20 +239,7 @@ void loop()
   }
   buttonWasPressed = buttonIsPressed;
 
-  static unsigned long lastStatusCheck = 0;
-  if (millis() - lastStatusCheck >= 3000) {
-    lastStatusCheck = millis();
-    Serial.println("Status opvragen...");
-    sendCommand(0x42); // DFPlayer: vraag huidige status op
+  logDfPlayerMessages();
 
-    uint8_t responseCommand = 0;
-    uint16_t responseParameter = 0;
-    if (readResponse(responseCommand, responseParameter)) {
-      Serial.println("VERBONDEN: geldige DFPlayer-reactie ontvangen.");
-    } else {
-      Serial.println("GEEN REACTIE: controleer 5V, GND en TX/RX.");
-    }
-  }
-
-  delay(250);
+  delay(50);
 }
