@@ -1,4 +1,107 @@
 #include <Arduino.h>
+#include <Wire.h>
+
+// I²C test: TCA9548A (0x70)
+//   kanaal 0 -> MPU6050  (0x68)
+//   kanaal 1 -> MCP23017 (0x20)
+// ESP32: SDA=GPIO23, SCL=GPIO22
+const uint8_t MPU_CH = 0;
+const uint8_t MCP_CH = 1;
+const uint8_t TCA_ADDR = 0x70;
+const uint8_t MCP_ADDR = 0x20;
+const uint8_t MPU_ADDR = 0x68;
+unsigned long lastI2cRead = 0;
+
+bool tcaSelect(uint8_t channel)
+{
+  Wire.beginTransmission(TCA_ADDR);
+  Wire.write(1 << channel);
+  return Wire.endTransmission() == 0;
+}
+
+bool writeReg(uint8_t addr, uint8_t reg, uint8_t value)
+{
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool readRegs(uint8_t addr, uint8_t reg, uint8_t *data, uint8_t len)
+{
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(addr, len) != len) return false;
+  for (uint8_t i = 0; i < len; ++i) data[i] = Wire.read();
+  return true;
+}
+
+// Toont welke I²C-adressen antwoorden op het geselecteerde kanaal.
+void scanChannel(uint8_t channel)
+{
+  Serial.printf("Kanaal %u:", channel);
+  tcaSelect(channel);
+  bool found = false;
+  for (uint8_t addr = 1; addr < 127; ++addr) {
+    if (addr == TCA_ADDR) continue;
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf(" 0x%02X", addr);
+      found = true;
+    }
+  }
+  Serial.println(found ? "" : " niets gevonden");
+}
+
+void scanI2c()
+{
+  Serial.println("I2C test (TCA9548A):");
+  Serial.println(tcaSelect(0) ? "TCA9548A: OK" : "TCA9548A: NIET GEVONDEN");
+  scanChannel(0); // verwacht 0x68
+  scanChannel(1); // verwacht 0x20
+}
+
+void initI2cTest()
+{
+  Wire.begin(23, 22);
+  scanI2c();
+
+  // MCP23017: alle pinnen ingang met pull-up.
+  tcaSelect(MCP_CH);
+  const bool mcp = writeReg(MCP_ADDR, 0x00, 0xFF) && writeReg(MCP_ADDR, 0x01, 0xFF) &&
+                   writeReg(MCP_ADDR, 0x0C, 0xFF) && writeReg(MCP_ADDR, 0x0D, 0xFF);
+  Serial.println(mcp ? "MCP23017: OK" : "MCP23017: NIET GEVONDEN");
+
+  // MPU6050: uit slaapstand halen.
+  tcaSelect(MPU_CH);
+  Serial.println(writeReg(MPU_ADDR, 0x6B, 0x00) ? "MPU6050: OK" : "MPU6050: NIET GEVONDEN");
+}
+
+void updateI2cTest()
+{
+  if (millis() - lastI2cRead < 500) return;
+  lastI2cRead = millis();
+
+  uint8_t gpio[2];
+  tcaSelect(MCP_CH);
+  if (readRegs(MCP_ADDR, 0x12, gpio, 2)) {
+    Serial.printf("MCP23017 A=0x%02X B=0x%02X | ", gpio[0], gpio[1]);
+  } else {
+    Serial.print("MCP23017 leesfout | ");
+  }
+
+  uint8_t raw[14];
+  tcaSelect(MPU_CH);
+  if (readRegs(MPU_ADDR, 0x3B, raw, sizeof(raw))) {
+    auto v = [&](uint8_t i) { return (int16_t)((raw[i] << 8) | raw[i + 1]); };
+    Serial.printf("MPU6050 accel[g] %.2f %.2f %.2f | gyro[deg/s] %.1f %.1f %.1f\n",
+                  v(0) / 16384.0f, v(2) / 16384.0f, v(4) / 16384.0f,
+                  v(8) / 131.0f, v(10) / 131.0f, v(12) / 131.0f);
+  } else {
+    Serial.println("MPU6050 leesfout");
+  }
+}
 
 // DFPlayer Mini: ESP32 GPIO17 (TX2) -> RX, GPIO16 (RX2) <- TX
 HardwareSerial dfPlayer(2);
@@ -211,6 +314,8 @@ void setup()
   Serial.println("Volgende-knop: GPIO25 naar GND.");
   pinMode(nextButtonPin, INPUT_PULLUP);
   Serial.println();
+  initI2cTest();
+  Serial.println();
   Serial.println("Commando-test:");
   testSdCard();
   testCommand("Status", 0x42);
@@ -240,6 +345,14 @@ void loop()
   buttonWasPressed = buttonIsPressed;
 
   logDfPlayerMessages();
+  updateI2cTest();
+
+  // 'v' in de seriële monitor: I²C opnieuw scannen.
+  while (Serial.available()) {
+    if (Serial.read() == 'v') {
+      scanI2c();
+    }
+  }
 
   delay(50);
 }
